@@ -169,7 +169,7 @@ umount-darla() {
 # SSH Completion for modular config.d structure
 # =============================================================================
 # Build hosts array from Host aliases only (not HostName values)
-_ssh_config_hosts=(${(f)"$(awk '/^Host / && \!/\*/ {print $2}' ~/.ssh/config ~/.ssh/config.d/* 2>/dev/null)"})
+_ssh_config_hosts=(${(f)"$(awk '/^Host / && !/\*/ {print $2}' ~/.ssh/config ~/.ssh/config.d/* 2>/dev/null)"})
 
 # Disable default host sources (known_hosts, /etc/hosts, etc.)
 zstyle ':completion:*:(ssh|scp|sshfs|rsync):*' known-hosts-files '/dev/null'
