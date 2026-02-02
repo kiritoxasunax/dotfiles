@@ -164,3 +164,15 @@ umount-darla() {
     echo "Not mounted: $mnt"
   fi
 }
+
+# =============================================================================
+# SSH Completion for modular config.d structure
+# =============================================================================
+_ssh_hosts() {
+    local hosts
+    hosts=($(awk '/^Host / && !/\*/ {print $2}' ~/.ssh/config ~/.ssh/config.d/* 2>/dev/null))
+    echo $hosts
+}
+zstyle ':completion:*:ssh:*' hosts $(_ssh_hosts)
+zstyle ':completion:*:scp:*' hosts $(_ssh_hosts)
+zstyle ':completion:*:rsync:*' hosts $(_ssh_hosts)
