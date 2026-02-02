@@ -168,14 +168,17 @@ umount-darla() {
 # =============================================================================
 # SSH Completion for modular config.d structure
 # =============================================================================
-# Build hosts array from all SSH config files
+# Build hosts array from Host aliases only (not HostName values)
 _ssh_config_hosts=(${(f)"$(awk '/^Host / && \!/\*/ {print $2}' ~/.ssh/config ~/.ssh/config.d/* 2>/dev/null)"})
 
-# Register hosts with zsh completion system
+# Disable default host sources (known_hosts, /etc/hosts, etc.)
+zstyle ':completion:*:(ssh|scp|sshfs|rsync):*' known-hosts-files '/dev/null'
+zstyle ':completion:*:(ssh|scp|sshfs|rsync):*' users-hosts-ports $_ssh_config_hosts
+
+# Use ONLY our custom hosts list
 zstyle ':completion:*:(ssh|scp|sshfs|rsync):*' hosts $_ssh_config_hosts
+zstyle ':completion:*:(ssh|scp|sshfs|rsync):*' config-host-file '/dev/null'
 
-# Enable menu selection for easier picking
+# Enable menu selection and sorting
 zstyle ':completion:*:(ssh|scp|sshfs|rsync):*' menu select
-
-# Sort hosts alphabetically  
 zstyle ':completion:*:(ssh|scp|sshfs|rsync):*' sort true
