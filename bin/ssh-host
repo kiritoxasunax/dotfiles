@@ -69,7 +69,13 @@ get_all_hosts() {
 # Find which config file contains a host
 find_host_file() {
     local host="$1"
-    grep -l "^Host ${host}$" "$CONFIG_DIR"/*.conf 2>/dev/null | head -1
+    local result
+    result=$(grep -l "^Host ${host}$" "$CONFIG_DIR"/*.conf 2>/dev/null | head -1)
+    if [[ -n "$result" ]]; then
+        echo "$result"
+        return 0
+    fi
+    return 1
 }
 
 # Get host details
