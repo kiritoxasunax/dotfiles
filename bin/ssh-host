@@ -6,7 +6,27 @@
 set -e
 
 CONFIG_DIR="$HOME/.ssh/config.d"
-IDENTITY_FILE="~/.ssh/id_rsa"
+
+# SSH Key configurations
+KEY_PERSONAL="~/.ssh/id_ed25519_personal"
+KEY_WORK="~/.ssh/id_rsa"
+
+# Get key path by type
+get_key_path() {
+    case "$1" in
+        personal|1) echo "$KEY_PERSONAL" ;;
+        work|2)     echo "$KEY_WORK" ;;
+        *)          echo "$KEY_PERSONAL" ;;  # Default to personal
+    esac
+}
+
+get_key_name() {
+    case "$1" in
+        personal|1) echo "Personal" ;;
+        work|2)     echo "Work" ;;
+        *)          echo "Personal" ;;
+    esac
+}
 
 # Color codes
 RED="\033[0;31m"
@@ -194,6 +214,21 @@ cmd_add() {
     read -rp "User [$default_user]: " user
     user="${user:-$default_user}"
 
+    # Select SSH key (only for personal hosts)
+    local key_type="personal"
+    local identity_file=""
+    if [[ "$type_num" == "1" ]]; then
+        echo
+        echo "Select SSH key:"
+        echo "  1) Personal (default) - $KEY_PERSONAL"
+        echo "  2) Work               - $KEY_WORK"
+        echo
+        read -rp "Key [1]: " key_choice
+        key_choice="${key_choice:-1}"
+        key_type=$(get_key_name "$key_choice")
+        identity_file=$(get_key_path "$key_choice")
+    fi
+
     # Show summary
     echo
     echo -e "${BOLD}Summary:${NC}"
@@ -201,6 +236,9 @@ cmd_add() {
     echo "  HostName: $hostname"
     echo "  Port:     $port"
     echo "  User:     $user"
+    if [[ -n "$identity_file" ]]; then
+        echo "  Key:      $key_type ($identity_file)"
+    fi
     echo "  File:     $CONFIG_DIR/$config_file"
     echo
 
@@ -212,13 +250,24 @@ cmd_add() {
 
     # Add to config file
     local config_path="$CONFIG_DIR/$config_file"
-    cat >> "$config_path" << EOF
+    if [[ -n "$identity_file" ]]; then
+        cat >> "$config_path" << EOF
+
+Host $host_alias
+    HostName $hostname
+    Port $port
+    User $user
+    IdentityFile $identity_file
+EOF
+    else
+        cat >> "$config_path" << EOF
 
 Host $host_alias
     HostName $hostname
     Port $port
     User $user
 EOF
+    fi
 
     print_success "Added '$host_alias' to $config_file"
 
@@ -401,6 +450,112 @@ cmd_test() {
     fi
 }
 
+# Change SSH key for a host
+cmd_change_key() {
+    local host="$1"
+
+    if [[ -z "$host" ]]; then
+        echo -e "${BOLD}Change SSH Key${NC}\n"
+        read -rp "Host alias: " host
+    fi
+
+    local file
+    file=$(find_host_file "$host")
+    if [[ -z "$file" ]]; then
+        print_error "Host '$host' not found"
+        exit 1
+    fi
+
+    echo
+    echo -e "${BOLD}Current entry:${NC}"
+    get_host_details "$host" | sed 's/^/  /'
+    echo
+
+    # Get current key if any
+    local current cur_key
+    current=$(get_host_details "$host")
+    cur_key=$(echo "$current" | awk '/IdentityFile/ {print $2}')
+
+    if [[ -n "$cur_key" ]]; then
+        print_info "Current key: $cur_key"
+    else
+        print_info "Current key: (using default from config)"
+    fi
+    echo
+
+    # Select new key
+    echo "Select new SSH key:"
+    echo "  1) Personal - $KEY_PERSONAL"
+    echo "  2) Work     - $KEY_WORK"
+    echo "  3) Remove   - (use default from config)"
+    echo
+    read -rp "Key [1-3]: " key_choice
+
+    local new_key=""
+    local key_name=""
+    case "$key_choice" in
+        1) new_key="$KEY_PERSONAL"; key_name="Personal" ;;
+        2) new_key="$KEY_WORK"; key_name="Work" ;;
+        3) new_key=""; key_name="(remove)" ;;
+        *) print_error "Invalid selection"; exit 1 ;;
+    esac
+
+    # Check if anything changed
+    if [[ "$new_key" == "$cur_key" ]]; then
+        print_info "No changes made"
+        exit 0
+    fi
+
+    echo
+    if [[ -n "$new_key" ]]; then
+        echo -e "${BOLD}New key:${NC} $key_name ($new_key)"
+    else
+        echo -e "${BOLD}Action:${NC} Remove IdentityFile (use default)"
+    fi
+    echo
+
+    read -rp "Apply changes? [Y/n]: " confirm
+    if [[ "${confirm,,}" == "n" ]]; then
+        print_info "Cancelled"
+        exit 0
+    fi
+
+    if [[ -n "$new_key" ]]; then
+        # Add or update IdentityFile
+        if [[ -n "$cur_key" ]]; then
+            # Update existing IdentityFile line
+            awk -v host="$host" -v newkey="$new_key" '
+                /^Host / {
+                    in_block = ($2 == host)
+                }
+                in_block && /IdentityFile/ { $0 = "    IdentityFile " newkey }
+                { print }
+            ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+        else
+            # Add IdentityFile line after User line
+            awk -v host="$host" -v newkey="$new_key" '
+                /^Host / {
+                    in_block = ($2 == host)
+                }
+                { print }
+                in_block && /User / {
+                    print "    IdentityFile " newkey
+                }
+            ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+        fi
+        print_success "Updated '$host' to use $key_name key"
+    else
+        # Remove IdentityFile line
+        awk -v host="$host" '
+            /^Host / {
+                in_block = ($2 == host)
+            }
+            !(in_block && /IdentityFile/) { print }
+        ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+        print_success "Removed IdentityFile from '$host'"
+    fi
+}
+
 # Search hosts
 cmd_search() {
     local pattern="$1"
@@ -443,6 +598,7 @@ cmd_menu() {
         echo "  5) Edit host"
         echo "  6) Remove host"
         echo "  7) Test connection"
+        echo "  8) Change SSH key"
         echo "  q) Quit"
         echo
         read -rp "Select option: " choice
@@ -455,6 +611,7 @@ cmd_menu() {
             5) cmd_edit ;;
             6) cmd_remove ;;
             7) cmd_test ;;
+            8) cmd_change_key ;;
             q|Q) exit 0 ;;
             *) print_error "Invalid option" ;;
         esac
@@ -470,15 +627,20 @@ usage() {
 Usage: $(basename "$0") [command] [args]
 
 Commands:
-  add              Add a new SSH host (interactive)
-  list, ls         List all hosts
-  search, s <pat>  Search for hosts matching pattern
-  show <host>      Show details for a host
-  edit <host>      Edit an existing host
-  remove, rm <host> Remove a host
-  test <host>      Test connection to a host
-  menu             Interactive menu (default)
-  help             Show this help
+  add                  Add a new SSH host (interactive)
+  list, ls             List all hosts
+  search, s <pat>      Search for hosts matching pattern
+  show <host>          Show details for a host
+  edit <host>          Edit an existing host
+  remove, rm <host>    Remove a host
+  test <host>          Test connection to a host
+  change-key <host>    Change SSH key for a host
+  menu                 Interactive menu (default)
+  help                 Show this help
+
+SSH Keys:
+  Personal: $KEY_PERSONAL
+  Work:     $KEY_WORK
 
 Examples:
   $(basename "$0")                    # Interactive menu
@@ -489,19 +651,21 @@ Examples:
   $(basename "$0") edit server1       # Edit server1
   $(basename "$0") rm server1         # Remove server1
   $(basename "$0") test server1       # Test connection
+  $(basename "$0") change-key server1 # Change SSH key
 EOF
 }
 
 # Main
 case "${1:-menu}" in
-    add)        cmd_add ;;
-    list|ls)    cmd_list ;;
-    search|s)   cmd_search "$2" ;;
-    show)       cmd_show "$2" ;;
-    edit)       cmd_edit "$2" ;;
-    remove|rm)  cmd_remove "$2" ;;
-    test)       cmd_test "$2" ;;
-    menu)       cmd_menu ;;
+    add)            cmd_add ;;
+    list|ls)        cmd_list ;;
+    search|s)       cmd_search "$2" ;;
+    show)           cmd_show "$2" ;;
+    edit)           cmd_edit "$2" ;;
+    remove|rm)      cmd_remove "$2" ;;
+    test)           cmd_test "$2" ;;
+    change-key)     cmd_change_key "$2" ;;
+    menu)           cmd_menu ;;
     help|-h|--help) usage ;;
-    *)          usage; exit 1 ;;
+    *)              usage; exit 1 ;;
 esac
