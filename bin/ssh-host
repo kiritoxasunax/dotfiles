@@ -1,0 +1,501 @@
+#!/usr/bin/env bash
+#
+# ssh-host - Manage SSH config entries in ~/.ssh/config.d/
+#
+
+set -e
+
+CONFIG_DIR="$HOME/.ssh/config.d"
+IDENTITY_FILE="~/.ssh/id_rsa"
+
+# Color codes
+RED="\033[0;31m"
+GREEN="\033[0;32m"
+YELLOW="\033[0;33m"
+BLUE="\033[0;34m"
+CYAN="\033[0;36m"
+BOLD="\033[1m"
+NC="\033[0m"
+
+# Server type configurations
+# Format: config_file|default_port|default_user|hostname_suffix
+get_type_config() {
+    case "$1" in
+        1) echo "10-personal.conf|22|wdkish|" ;;
+        2) echo "50-tch-dedicated.conf|39292|root|.tchmachines.com" ;;
+        3) echo "60-tch-vps.conf|39292|root|.tchmachines.com" ;;
+        4) echo "30-tch-shared.conf|46368|root|.tchmachines.com" ;;
+        5) echo "40-tch-reseller.conf|46368|root|.tchmachines.com" ;;
+        6) echo "20-tch-internal.conf|46368|root|.tchmachines.com" ;;
+        *) echo "" ;;
+    esac
+}
+
+get_type_name() {
+    case "$1" in
+        1) echo "Personal" ;;
+        2) echo "TCH Dedicated" ;;
+        3) echo "TCH VPS" ;;
+        4) echo "TCH Shared" ;;
+        5) echo "TCH Reseller" ;;
+        6) echo "TCH Internal" ;;
+        *) echo "Unknown" ;;
+    esac
+}
+
+print_header() {
+    echo -e "\n${BOLD}${BLUE}═══════════════════════════════════════${NC}"
+    echo -e "${BOLD}${BLUE}  SSH Host Manager${NC}"
+    echo -e "${BOLD}${BLUE}═══════════════════════════════════════${NC}\n"
+}
+
+print_success() {
+    echo -e "${GREEN}✓${NC} $1"
+}
+
+print_error() {
+    echo -e "${RED}✗${NC} $1"
+}
+
+print_info() {
+    echo -e "${CYAN}→${NC} $1"
+}
+
+# Get all hosts from all config files
+get_all_hosts() {
+    awk '/^Host / && !/\*/ {print $2}' "$CONFIG_DIR"/*.conf 2>/dev/null | sort
+}
+
+# Find which config file contains a host
+find_host_file() {
+    local host="$1"
+    grep -l "^Host ${host}$" "$CONFIG_DIR"/*.conf 2>/dev/null | head -1
+}
+
+# Get host details
+get_host_details() {
+    local host="$1"
+    local file
+    file=$(find_host_file "$host")
+    if [[ -n "$file" ]]; then
+        awk -v host="$host" '
+            /^Host / {
+                if (found) exit
+                found = ($2 == host)
+            }
+            found { print }
+        ' "$file"
+    fi
+}
+
+# List all hosts
+cmd_list() {
+    echo -e "${BOLD}SSH Hosts by Config File:${NC}\n"
+
+    for conf in "$CONFIG_DIR"/*.conf; do
+        [[ -f "$conf" ]] || continue
+        local basename
+        basename=$(basename "$conf")
+        local hosts
+        hosts=$(awk '/^Host / && !/\*/ {print $2}' "$conf" 2>/dev/null)
+
+        if [[ -n "$hosts" ]]; then
+            echo -e "${YELLOW}[$basename]${NC}"
+            echo "$hosts" | while read -r h; do
+                echo "  $h"
+            done
+            echo
+        fi
+    done
+
+    local total
+    total=$(get_all_hosts | wc -l)
+    echo -e "${CYAN}Total: $total hosts${NC}"
+}
+
+# Add a new host
+cmd_add() {
+    echo -e "${BOLD}Add New SSH Host${NC}\n"
+
+    # Select server type
+    echo "Select server type:"
+    echo "  1) Personal"
+    echo "  2) TCH Dedicated"
+    echo "  3) TCH VPS"
+    echo "  4) TCH Shared"
+    echo "  5) TCH Reseller"
+    echo "  6) TCH Internal"
+    echo
+
+    read -rp "Type [1-6]: " type_num
+
+    local type_config
+    type_config=$(get_type_config "$type_num")
+
+    if [[ -z "$type_config" ]]; then
+        print_error "Invalid type selection"
+        exit 1
+    fi
+
+    local type_name
+    type_name=$(get_type_name "$type_num")
+
+    # Parse config
+    local config_file default_port default_user hostname_suffix
+    IFS='|' read -r config_file default_port default_user hostname_suffix <<< "$type_config"
+
+    print_info "Selected: $type_name"
+    echo
+
+    # Get host alias
+    read -rp "Host alias (e.g., dedicated123): " host_alias
+    if [[ -z "$host_alias" ]]; then
+        print_error "Host alias is required"
+        exit 1
+    fi
+
+    # Check if host already exists
+    if find_host_file "$host_alias" >/dev/null 2>&1; then
+        print_error "Host '$host_alias' already exists"
+        exit 1
+    fi
+
+    # Get hostname/IP
+    local default_hostname=""
+    if [[ -n "$hostname_suffix" ]]; then
+        default_hostname="${host_alias}${hostname_suffix}"
+    fi
+
+    local hostname
+    if [[ -n "$default_hostname" ]]; then
+        read -rp "Hostname/IP [$default_hostname]: " hostname
+        hostname="${hostname:-$default_hostname}"
+    else
+        read -rp "Hostname/IP: " hostname
+        if [[ -z "$hostname" ]]; then
+            print_error "Hostname is required"
+            exit 1
+        fi
+    fi
+
+    # Get port
+    local port
+    read -rp "Port [$default_port]: " port
+    port="${port:-$default_port}"
+
+    # Get user
+    local user
+    read -rp "User [$default_user]: " user
+    user="${user:-$default_user}"
+
+    # Show summary
+    echo
+    echo -e "${BOLD}Summary:${NC}"
+    echo "  Host:     $host_alias"
+    echo "  HostName: $hostname"
+    echo "  Port:     $port"
+    echo "  User:     $user"
+    echo "  File:     $CONFIG_DIR/$config_file"
+    echo
+
+    read -rp "Add this host? [Y/n]: " confirm
+    if [[ "${confirm,,}" == "n" ]]; then
+        print_info "Cancelled"
+        exit 0
+    fi
+
+    # Add to config file
+    local config_path="$CONFIG_DIR/$config_file"
+    cat >> "$config_path" << EOF
+
+Host $host_alias
+    HostName $hostname
+    Port $port
+    User $user
+EOF
+
+    print_success "Added '$host_alias' to $config_file"
+
+    # Offer to test connection
+    echo
+    read -rp "Test connection? [y/N]: " test_conn
+    if [[ "${test_conn,,}" == "y" ]]; then
+        echo
+        print_info "Testing connection to $host_alias..."
+        if ssh -o ConnectTimeout=10 -o BatchMode=yes "$host_alias" "echo 'Connection successful'" 2>/dev/null; then
+            print_success "Connection test passed"
+        else
+            print_error "Connection test failed (this might be expected if key isn't deployed yet)"
+        fi
+    fi
+}
+
+# Remove a host
+cmd_remove() {
+    local host="$1"
+
+    if [[ -z "$host" ]]; then
+        echo -e "${BOLD}Remove SSH Host${NC}\n"
+        read -rp "Host alias to remove: " host
+    fi
+
+    local file
+    file=$(find_host_file "$host")
+    if [[ -z "$file" ]]; then
+        print_error "Host '$host' not found"
+        exit 1
+    fi
+
+    echo
+    echo -e "${BOLD}Current entry:${NC}"
+    get_host_details "$host" | sed 's/^/  /'
+    echo
+    echo -e "${YELLOW}File: $file${NC}"
+    echo
+
+    read -rp "Remove this host? [y/N]: " confirm
+    if [[ "${confirm,,}" != "y" ]]; then
+        print_info "Cancelled"
+        exit 0
+    fi
+
+    # Remove the host block
+    awk -v host="$host" '
+        /^Host / {
+            if (skip) skip = 0
+            if ($2 == host) { skip = 1; next }
+        }
+        /^[^ \t]/ && !/^Host / { skip = 0 }
+        !skip { print }
+    ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+
+    # Clean up extra blank lines
+    sed -i '/^$/N;/^\n$/d' "$file"
+
+    print_success "Removed '$host' from $(basename "$file")"
+}
+
+# Edit a host
+cmd_edit() {
+    local host="$1"
+
+    if [[ -z "$host" ]]; then
+        echo -e "${BOLD}Edit SSH Host${NC}\n"
+        read -rp "Host alias to edit: " host
+    fi
+
+    local file
+    file=$(find_host_file "$host")
+    if [[ -z "$file" ]]; then
+        print_error "Host '$host' not found"
+        exit 1
+    fi
+
+    echo
+    echo -e "${BOLD}Current entry:${NC}"
+    get_host_details "$host" | sed 's/^/  /'
+    echo
+
+    # Extract current values
+    local current cur_hostname cur_port cur_user
+    current=$(get_host_details "$host")
+    cur_hostname=$(echo "$current" | awk '/HostName/ {print $2}')
+    cur_port=$(echo "$current" | awk '/Port/ {print $2}')
+    cur_user=$(echo "$current" | awk '/User/ {print $2}')
+
+    echo "Enter new values (leave blank to keep current):"
+    echo
+
+    local new_hostname new_port new_user
+    read -rp "HostName [$cur_hostname]: " new_hostname
+    new_hostname="${new_hostname:-$cur_hostname}"
+
+    read -rp "Port [$cur_port]: " new_port
+    new_port="${new_port:-$cur_port}"
+
+    read -rp "User [$cur_user]: " new_user
+    new_user="${new_user:-$cur_user}"
+
+    # Check if anything changed
+    if [[ "$new_hostname" == "$cur_hostname" && "$new_port" == "$cur_port" && "$new_user" == "$cur_user" ]]; then
+        print_info "No changes made"
+        exit 0
+    fi
+
+    echo
+    echo -e "${BOLD}New values:${NC}"
+    echo "  HostName: $new_hostname"
+    echo "  Port:     $new_port"
+    echo "  User:     $new_user"
+    echo
+
+    read -rp "Apply changes? [Y/n]: " confirm
+    if [[ "${confirm,,}" == "n" ]]; then
+        print_info "Cancelled"
+        exit 0
+    fi
+
+    # Update the file
+    awk -v host="$host" -v hn="$new_hostname" -v port="$new_port" -v user="$new_user" '
+        /^Host / {
+            in_block = ($2 == host)
+        }
+        in_block && /HostName/ { $0 = "    HostName " hn }
+        in_block && /Port/ { $0 = "    Port " port }
+        in_block && /User/ { $0 = "    User " user }
+        { print }
+    ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+
+    print_success "Updated '$host'"
+}
+
+# Show host details
+cmd_show() {
+    local host="$1"
+
+    if [[ -z "$host" ]]; then
+        read -rp "Host alias: " host
+    fi
+
+    local file
+    file=$(find_host_file "$host")
+    if [[ -z "$file" ]]; then
+        print_error "Host '$host' not found"
+        exit 1
+    fi
+
+    echo
+    echo -e "${BOLD}Host: $host${NC}"
+    echo -e "${YELLOW}File: $(basename "$file")${NC}"
+    echo
+    get_host_details "$host" | sed 's/^/  /'
+}
+
+# Test connection
+cmd_test() {
+    local host="$1"
+
+    if [[ -z "$host" ]]; then
+        read -rp "Host alias to test: " host
+    fi
+
+    if ! find_host_file "$host" >/dev/null 2>&1; then
+        print_error "Host '$host' not found in config"
+        exit 1
+    fi
+
+    print_info "Testing connection to $host..."
+    echo
+
+    if ssh -o ConnectTimeout=10 -o BatchMode=yes "$host" "echo -e '${GREEN}✓ Connection successful${NC}'; hostname; uptime" 2>/dev/null; then
+        :
+    else
+        print_error "Connection failed"
+        exit 1
+    fi
+}
+
+# Search hosts
+cmd_search() {
+    local pattern="$1"
+
+    if [[ -z "$pattern" ]]; then
+        read -rp "Search pattern: " pattern
+    fi
+
+    echo -e "${BOLD}Hosts matching '$pattern':${NC}\n"
+
+    local found=0
+    for conf in "$CONFIG_DIR"/*.conf; do
+        [[ -f "$conf" ]] || continue
+        local matches
+        matches=$(awk '/^Host / && !/\*/ {print $2}' "$conf" 2>/dev/null | grep -i "$pattern" || true)
+
+        if [[ -n "$matches" ]]; then
+            echo -e "${YELLOW}[$(basename "$conf")]${NC}"
+            echo "$matches" | while read -r h; do
+                echo "  $h"
+                found=$((found + 1))
+            done
+            echo
+        fi
+    done
+
+    if [[ $found -eq 0 ]]; then
+        print_info "No hosts found matching '$pattern'"
+    fi
+}
+
+# Interactive menu
+cmd_menu() {
+    while true; do
+        print_header
+        echo "  1) Add new host"
+        echo "  2) List all hosts"
+        echo "  3) Search hosts"
+        echo "  4) Show host details"
+        echo "  5) Edit host"
+        echo "  6) Remove host"
+        echo "  7) Test connection"
+        echo "  q) Quit"
+        echo
+        read -rp "Select option: " choice
+
+        case "$choice" in
+            1) cmd_add ;;
+            2) cmd_list ;;
+            3) cmd_search ;;
+            4) cmd_show ;;
+            5) cmd_edit ;;
+            6) cmd_remove ;;
+            7) cmd_test ;;
+            q|Q) exit 0 ;;
+            *) print_error "Invalid option" ;;
+        esac
+
+        echo
+        read -rp "Press Enter to continue..."
+    done
+}
+
+# Show usage
+usage() {
+    cat << EOF
+Usage: $(basename "$0") [command] [args]
+
+Commands:
+  add              Add a new SSH host (interactive)
+  list, ls         List all hosts
+  search, s <pat>  Search for hosts matching pattern
+  show <host>      Show details for a host
+  edit <host>      Edit an existing host
+  remove, rm <host> Remove a host
+  test <host>      Test connection to a host
+  menu             Interactive menu (default)
+  help             Show this help
+
+Examples:
+  $(basename "$0")                    # Interactive menu
+  $(basename "$0") add                # Add new host
+  $(basename "$0") list               # List all hosts
+  $(basename "$0") search dedicated   # Search for 'dedicated'
+  $(basename "$0") show server1       # Show server1 details
+  $(basename "$0") edit server1       # Edit server1
+  $(basename "$0") rm server1         # Remove server1
+  $(basename "$0") test server1       # Test connection
+EOF
+}
+
+# Main
+case "${1:-menu}" in
+    add)        cmd_add ;;
+    list|ls)    cmd_list ;;
+    search|s)   cmd_search "$2" ;;
+    show)       cmd_show "$2" ;;
+    edit)       cmd_edit "$2" ;;
+    remove|rm)  cmd_remove "$2" ;;
+    test)       cmd_test "$2" ;;
+    menu)       cmd_menu ;;
+    help|-h|--help) usage ;;
+    *)          usage; exit 1 ;;
+esac
