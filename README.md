@@ -11,15 +11,19 @@ git clone --recurse-submodules https://github.com/kiritoxasunax/dotfiles.git ~/d
 # Or if already cloned, init submodules
 cd ~/dotfiles && git submodule update --init --recursive
 
+# Install stow if needed
+sudo dnf install stow
+
 # Deploy all configs
 cd ~/dotfiles
-stow shell zsh-custom alacritty kitty btop cava nvim niri dank-material-shell konsole
+stow shell zsh-custom bin alacritty kitty btop cava nvim niri dank-material-shell konsole
 ```
 
 ## Prerequisites
 
 Before deploying, ensure these are installed:
 
+- **stow** - GNU Stow for symlink management
 - **zsh** + **oh-my-zsh** (clone oh-my-zsh separately, custom dir managed here)
 - **alacritty** - GPU-accelerated terminal
 - **kitty** - Another GPU terminal
@@ -35,6 +39,7 @@ Before deploying, ensure these are installed:
 |---------|--------|-------------|
 | `shell` | `~/` | zshrc, bashrc, p10k, fzf, nanorc |
 | `zsh-custom` | `~/.oh-my-zsh/custom/` | Zsh plugins & themes (submodules) |
+| `bin` | `~/bin/` | Custom scripts (system-maintenance, ssh-host) |
 | `alacritty` | `~/.config/alacritty/` | Alacritty terminal config |
 | `kitty` | `~/.config/kitty/` | Kitty terminal config |
 | `btop` | `~/.config/btop/` | Btop resource monitor config |
