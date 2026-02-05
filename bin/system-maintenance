@@ -1,0 +1,657 @@
+#!/usr/bin/env bash
+#===============================================================================
+# System Maintenance Script for Fedora Linux
+# Performs comprehensive system updates, cleanup, and maintenance tasks
+#===============================================================================
+
+set -o pipefail
+
+#-------------------------------------------------------------------------------
+# Color Definitions
+#-------------------------------------------------------------------------------
+RED="\033[0;31m"
+GREEN="\033[0;32m"
+YELLOW="\033[0;33m"
+BLUE="\033[0;34m"
+MAGENTA="\033[0;35m"
+CYAN="\033[0;36m"
+BOLD="\033[1m"
+RESET="\033[0m"
+
+#-------------------------------------------------------------------------------
+# Counters and Statistics
+#-------------------------------------------------------------------------------
+PACKAGES_UPDATED=0
+FLATPAKS_UPDATED=0
+BREW_UPDATED=0
+ERRORS_ENCOUNTERED=0
+INITIAL_DISK_USAGE=""
+FINAL_DISK_USAGE=""
+
+#-------------------------------------------------------------------------------
+# Output Functions
+#-------------------------------------------------------------------------------
+print_header() {
+    echo -e "\n${BOLD}${BLUE}╔════════════════════════════════════════════════════════════════╗${RESET}"
+    echo -e "${BOLD}${BLUE}║${RESET} ${BOLD}$1${RESET}"
+    echo -e "${BOLD}${BLUE}╚════════════════════════════════════════════════════════════════╝${RESET}"
+}
+
+print_section() {
+    echo -e "\n${CYAN}▶ $1${RESET}"
+}
+
+print_success() {
+    echo -e "${GREEN}✓ $1${RESET}"
+}
+
+print_info() {
+    echo -e "${YELLOW}ℹ $1${RESET}"
+}
+
+print_error() {
+    echo -e "${RED}✗ $1${RESET}"
+    ((ERRORS_ENCOUNTERED++))
+}
+
+print_skip() {
+    echo -e "${MAGENTA}⊘ $1 (skipped - not installed)${RESET}"
+}
+
+print_progress() {
+    echo -e "${BLUE}  → $1${RESET}"
+}
+
+#-------------------------------------------------------------------------------
+# Utility Functions
+#-------------------------------------------------------------------------------
+command_exists() {
+    command -v "$1" &>/dev/null
+}
+
+get_disk_usage() {
+    df -h / | awk 'NR==2 {print $3 " used / " $2 " total (" $5 " used)"}'
+}
+
+get_disk_available_bytes() {
+    df --output=avail / | tail -1
+}
+
+calculate_space_freed() {
+    local initial=$1
+    local final=$2
+    local freed=$((final - initial))
+    if [[ $freed -gt 0 ]]; then
+        if [[ $freed -gt 1048576 ]]; then
+            echo "$(echo "scale=2; $freed / 1048576" | bc)G"
+        elif [[ $freed -gt 1024 ]]; then
+            echo "$(echo "scale=2; $freed / 1024" | bc)M"
+        else
+            echo "${freed}K"
+        fi
+    else
+        echo "0"
+    fi
+}
+
+#-------------------------------------------------------------------------------
+# Root/Sudo Check
+#-------------------------------------------------------------------------------
+check_privileges() {
+    print_header "SYSTEM MAINTENANCE SCRIPT"
+    echo -e "${YELLOW}Starting at: $(date)${RESET}"
+
+    if [[ $EUID -ne 0 ]]; then
+        print_error "This script must be run with sudo/root privileges"
+        echo -e "${YELLOW}Please run: sudo $0${RESET}"
+        exit 1
+    fi
+    print_success "Running with root privileges"
+
+    if [[ -n "$SUDO_USER" ]]; then
+        ACTUAL_USER="$SUDO_USER"
+        ACTUAL_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+    else
+        ACTUAL_USER="$USER"
+        ACTUAL_HOME="$HOME"
+    fi
+    print_info "User home directory: $ACTUAL_HOME"
+}
+
+#-------------------------------------------------------------------------------
+# Disk Space Reporting
+#-------------------------------------------------------------------------------
+report_initial_disk() {
+    print_section "Initial Disk Usage"
+    INITIAL_DISK_USAGE=$(get_disk_usage)
+    INITIAL_DISK_BYTES=$(get_disk_available_bytes)
+    echo -e "  Root filesystem: ${BOLD}$INITIAL_DISK_USAGE${RESET}"
+}
+
+report_final_disk() {
+    print_section "Final Disk Usage"
+    FINAL_DISK_USAGE=$(get_disk_usage)
+    FINAL_DISK_BYTES=$(get_disk_available_bytes)
+    echo -e "  Root filesystem: ${BOLD}$FINAL_DISK_USAGE${RESET}"
+
+    SPACE_FREED=$(calculate_space_freed "$INITIAL_DISK_BYTES" "$FINAL_DISK_BYTES")
+    if [[ "$SPACE_FREED" != "0" ]]; then
+        echo -e "  ${GREEN}Space freed: ${BOLD}$SPACE_FREED${RESET}"
+    fi
+}
+
+#-------------------------------------------------------------------------------
+# Interactive Changelog Viewer
+#-------------------------------------------------------------------------------
+view_changelogs() {
+    local -a packages=("$@")
+
+    while true; do
+        echo ""
+        echo -e "${BOLD}Available packages with updates:${RESET}"
+        echo -e "${CYAN}─────────────────────────────────${RESET}"
+
+        local i=1
+        for pkg in "${packages[@]}"; do
+            echo -e "  ${YELLOW}[$i]${RESET} $pkg"
+            ((i++))
+        done
+
+        echo -e "${CYAN}─────────────────────────────────${RESET}"
+        echo -e "${BOLD}Options:${RESET}"
+        echo -e "  • Enter a ${YELLOW}number${RESET} to view that package's changelog"
+        echo -e "  • Enter a ${YELLOW}package name${RESET} to view its changelog"
+        echo -e "  • Enter ${GREEN}n${RESET}, ${GREEN}skip${RESET}, or ${GREEN}continue${RESET} to proceed with updates"
+        echo ""
+        echo -en "${BOLD}Your choice: ${RESET}"
+
+        read -r choice
+
+        case "$choice" in
+            n|N|skip|Skip|SKIP|continue|Continue|CONTINUE|"")
+                print_info "Proceeding with updates..."
+                return
+                ;;
+            *)
+                local pkg_to_show=""
+
+                if [[ "$choice" =~ ^[0-9]+$ ]]; then
+                    if [[ $choice -ge 1 && $choice -le ${#packages[@]} ]]; then
+                        pkg_to_show="${packages[$((choice-1))]}"
+                    else
+                        print_error "Invalid number. Please enter 1-${#packages[@]}"
+                        continue
+                    fi
+                else
+                    for pkg in "${packages[@]}"; do
+                        if [[ "$pkg" == "$choice"* ]]; then
+                            pkg_to_show="$pkg"
+                            break
+                        fi
+                    done
+
+                    if [[ -z "$pkg_to_show" ]]; then
+                        print_error "Package '$choice' not found in update list"
+                        continue
+                    fi
+                fi
+
+                local pkg_name
+                pkg_name=$(echo "$pkg_to_show" | awk '{print $1}')
+
+                echo ""
+                print_header "CHANGELOG: $pkg_name"
+                echo ""
+
+                if ! dnf changelog --changelogs "$pkg_name" 2>/dev/null | head -100; then
+                    print_error "Could not retrieve changelog for $pkg_name"
+                fi
+
+                echo ""
+                echo -e "${CYAN}─────────────────────────────────${RESET}"
+                echo -en "Press ${YELLOW}Enter${RESET} to continue..."
+                read -r
+                ;;
+        esac
+    done
+}
+
+prompt_for_changelogs() {
+    local -a packages=("$@")
+
+    echo ""
+    echo -en "${BOLD}Would you like to view changelogs before updating? ${RESET}"
+    echo -e "${YELLOW}(y/n/package-name)${RESET}: \c"
+
+    read -r response
+
+    case "$response" in
+        n|N|"")
+            print_info "Skipping changelog viewer..."
+            return
+            ;;
+        y|Y|yes|Yes|YES)
+            view_changelogs "${packages[@]}"
+            ;;
+        *)
+            local found=false
+            for pkg in "${packages[@]}"; do
+                if [[ "$pkg" == "$response"* ]]; then
+                    local pkg_name
+                    pkg_name=$(echo "$pkg" | awk '{print $1}')
+
+                    echo ""
+                    print_header "CHANGELOG: $pkg_name"
+                    echo ""
+
+                    if ! dnf changelog --changelogs "$pkg_name" 2>/dev/null | head -100; then
+                        print_error "Could not retrieve changelog for $pkg_name"
+                    fi
+
+                    found=true
+                    break
+                fi
+            done
+
+            if [[ "$found" == false ]]; then
+                print_error "Package '$response' not found in update list"
+            fi
+
+            echo ""
+            echo -en "${BOLD}View more changelogs? ${RESET}${YELLOW}(y/n)${RESET}: "
+            read -r more
+            if [[ "$more" == "y" || "$more" == "Y" ]]; then
+                view_changelogs "${packages[@]}"
+            fi
+            ;;
+    esac
+}
+
+#-------------------------------------------------------------------------------
+# DNF Updates
+#-------------------------------------------------------------------------------
+update_dnf() {
+    print_header "DNF PACKAGE UPDATES"
+
+    print_section "Checking for updates..."
+
+    local update_list
+    update_list=$(dnf check-update --quiet 2>/dev/null | grep "^[a-zA-Z]" || true)
+    local updates_available=0
+
+    if [[ -n "$update_list" ]]; then
+        updates_available=$(echo "$update_list" | wc -l)
+    fi
+
+    if [[ $updates_available -gt 0 ]]; then
+        print_info "$updates_available package(s) have updates available"
+
+        echo ""
+        echo -e "${BOLD}Packages to be updated:${RESET}"
+        echo -e "${CYAN}─────────────────────────────────${RESET}"
+        echo "$update_list" | head -50
+        if [[ $updates_available -gt 50 ]]; then
+            echo -e "${YELLOW}  ... and $((updates_available - 50)) more${RESET}"
+        fi
+        echo -e "${CYAN}─────────────────────────────────${RESET}"
+
+        local -a pkg_array
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && pkg_array+=("$line")
+        done <<< "$update_list"
+
+        prompt_for_changelogs "${pkg_array[@]}"
+
+        print_progress "Upgrading packages..."
+        if dnf upgrade -y --refresh; then
+            PACKAGES_UPDATED=$updates_available
+            print_success "DNF packages updated successfully"
+        else
+            print_error "DNF upgrade encountered errors"
+        fi
+    else
+        print_success "All DNF packages are up to date"
+    fi
+}
+
+#-------------------------------------------------------------------------------
+# Flatpak Updates (run as user to avoid XDG_DATA_DIRS warnings)
+#-------------------------------------------------------------------------------
+update_flatpak() {
+    print_header "FLATPAK UPDATES"
+
+    if ! command_exists flatpak; then
+        print_skip "Flatpak"
+        return
+    fi
+
+    print_section "Checking for Flatpak updates..."
+    local flatpak_updates
+    flatpak_updates=$(sudo -u "$ACTUAL_USER" flatpak remote-ls --updates 2>/dev/null | wc -l || echo "0")
+
+    if [[ $flatpak_updates -gt 0 ]]; then
+        print_info "$flatpak_updates Flatpak(s) have updates available"
+        print_progress "Updating Flatpaks..."
+        if sudo -u "$ACTUAL_USER" flatpak update -y; then
+            FLATPAKS_UPDATED=$flatpak_updates
+            print_success "Flatpak applications updated successfully"
+        else
+            print_error "Flatpak update encountered errors"
+        fi
+    else
+        print_success "All Flatpak applications are up to date"
+    fi
+}
+
+#-------------------------------------------------------------------------------
+# Homebrew Updates
+#-------------------------------------------------------------------------------
+update_homebrew() {
+    print_header "HOMEBREW UPDATES"
+
+    local brew_cmd=""
+    if [[ -x "$ACTUAL_HOME/.linuxbrew/bin/brew" ]]; then
+        brew_cmd="$ACTUAL_HOME/.linuxbrew/bin/brew"
+    elif [[ -x "/home/linuxbrew/.linuxbrew/bin/brew" ]]; then
+        brew_cmd="/home/linuxbrew/.linuxbrew/bin/brew"
+    elif command_exists brew; then
+        brew_cmd="brew"
+    fi
+
+    if [[ -z "$brew_cmd" ]]; then
+        print_skip "Homebrew"
+        return
+    fi
+
+    print_section "Updating Homebrew..."
+    if sudo -u "$ACTUAL_USER" "$brew_cmd" update; then
+        print_success "Homebrew updated"
+    else
+        print_error "Homebrew update failed"
+    fi
+
+    print_section "Checking for outdated packages..."
+    local outdated
+    outdated=$(sudo -u "$ACTUAL_USER" "$brew_cmd" outdated 2>/dev/null | wc -l || echo "0")
+
+    if [[ $outdated -gt 0 ]]; then
+        print_info "$outdated Homebrew package(s) outdated"
+        print_progress "Upgrading Homebrew packages..."
+        if sudo -u "$ACTUAL_USER" "$brew_cmd" upgrade; then
+            BREW_UPDATED=$outdated
+            print_success "Homebrew packages upgraded successfully"
+        else
+            print_error "Homebrew upgrade encountered errors"
+        fi
+    else
+        print_success "All Homebrew packages are up to date"
+    fi
+}
+
+#-------------------------------------------------------------------------------
+# Firmware Updates Check and Install
+#-------------------------------------------------------------------------------
+check_firmware() {
+    print_header "FIRMWARE UPDATES"
+
+    if ! command_exists fwupdmgr; then
+        print_skip "fwupdmgr"
+        return
+    fi
+
+    print_section "Refreshing firmware metadata..."
+    fwupdmgr refresh --force 2>/dev/null || true
+
+    print_section "Checking for firmware updates..."
+    local fw_updates
+    fw_updates=$(fwupdmgr get-updates 2>&1 || true)
+
+    # Check if no updates available
+    if echo "$fw_updates" | grep -q "No updates available"; then
+        print_success "All firmware is up to date"
+        echo ""
+        print_info "Scanned devices:"
+        echo "$fw_updates" | grep -E "^[[:space:]]+•" | head -15
+        return
+    fi
+
+    # Updates are available - show them
+    print_info "Firmware updates available:"
+    echo ""
+    echo -e "${CYAN}─────────────────────────────────${RESET}"
+    echo "$fw_updates"
+    echo -e "${CYAN}─────────────────────────────────${RESET}"
+    echo ""
+
+    # Prompt user for installation
+    echo -en "${BOLD}Install firmware updates now? ${RESET}${YELLOW}(y/n)${RESET}: "
+    read -r response
+
+    case "$response" in
+        y|Y|yes|Yes|YES)
+            print_progress "Installing firmware updates..."
+            echo ""
+            if fwupdmgr update -y; then
+                print_success "Firmware updates installed successfully"
+                print_info "Some firmware updates may require a reboot to complete"
+            else
+                print_error "Firmware update encountered errors"
+            fi
+            ;;
+        *)
+            print_info "Skipping firmware updates"
+            print_info "Run 'sudo fwupdmgr update' later to install"
+            ;;
+    esac
+}
+
+#-------------------------------------------------------------------------------
+# DNF Cleanup
+#-------------------------------------------------------------------------------
+cleanup_dnf() {
+    print_header "DNF CLEANUP"
+
+    print_section "Removing unused packages (autoremove)..."
+    if dnf autoremove -y; then
+        print_success "Unused packages removed"
+    else
+        print_error "DNF autoremove encountered errors"
+    fi
+
+    print_section "Cleaning package cache..."
+    if dnf clean all 2>&1; then
+        print_success "DNF cache cleaned"
+    else
+        print_error "DNF clean encountered errors"
+    fi
+}
+
+#-------------------------------------------------------------------------------
+# Kernel Info (DNF handles retention automatically via installonly_limit=3)
+#-------------------------------------------------------------------------------
+show_kernel_info() {
+    print_header "KERNEL STATUS"
+
+    print_section "Installed kernels:"
+    local kernel_count
+    kernel_count=$(rpm -q kernel 2>/dev/null | wc -l || echo "0")
+
+    if [[ $kernel_count -gt 0 ]]; then
+        rpm -q kernel | sed 's/^/  /'
+        echo ""
+        print_info "DNF automatically keeps only the last 3 kernels (installonly_limit=3)"
+        print_success "Currently running: $(uname -r)"
+    else
+        print_info "No standard kernels found (may be using kernel-core)"
+        rpm -q kernel-core 2>/dev/null | sed 's/^/  /' || true
+    fi
+}
+
+#-------------------------------------------------------------------------------
+# Flatpak Cleanup (run as user to avoid XDG_DATA_DIRS warnings)
+#-------------------------------------------------------------------------------
+cleanup_flatpak() {
+    print_header "FLATPAK CLEANUP"
+
+    if ! command_exists flatpak; then
+        print_skip "Flatpak"
+        return
+    fi
+
+    print_section "Removing unused Flatpak runtimes..."
+    if sudo -u "$ACTUAL_USER" flatpak uninstall --unused -y; then
+        print_success "Unused Flatpak runtimes removed"
+    else
+        print_info "No unused Flatpak runtimes to remove"
+    fi
+}
+
+#-------------------------------------------------------------------------------
+# Homebrew Cleanup
+#-------------------------------------------------------------------------------
+cleanup_homebrew() {
+    print_header "HOMEBREW CLEANUP"
+
+    local brew_cmd=""
+    if [[ -x "$ACTUAL_HOME/.linuxbrew/bin/brew" ]]; then
+        brew_cmd="$ACTUAL_HOME/.linuxbrew/bin/brew"
+    elif [[ -x "/home/linuxbrew/.linuxbrew/bin/brew" ]]; then
+        brew_cmd="/home/linuxbrew/.linuxbrew/bin/brew"
+    elif command_exists brew; then
+        brew_cmd="brew"
+    fi
+
+    if [[ -z "$brew_cmd" ]]; then
+        print_skip "Homebrew"
+        return
+    fi
+
+    print_section "Cleaning Homebrew cache..."
+    if sudo -u "$ACTUAL_USER" "$brew_cmd" cleanup -s; then
+        print_success "Homebrew cache cleaned"
+    else
+        print_error "Homebrew cleanup encountered errors"
+    fi
+
+    print_section "Removing old versions..."
+    sudo -u "$ACTUAL_USER" "$brew_cmd" cleanup --prune=all || true
+    print_success "Old Homebrew versions cleaned"
+}
+
+#-------------------------------------------------------------------------------
+# Journal Cleanup
+#-------------------------------------------------------------------------------
+cleanup_journal() {
+    print_header "SYSTEMD JOURNAL CLEANUP"
+
+    print_section "Current journal disk usage:"
+    journalctl --disk-usage
+
+    print_section "Cleaning journal logs older than 2 weeks..."
+    if journalctl --vacuum-time=14d 2>&1; then
+        print_success "Old journal logs removed"
+    else
+        print_error "Journal cleanup encountered errors"
+    fi
+
+    print_section "New journal disk usage:"
+    journalctl --disk-usage
+}
+
+#-------------------------------------------------------------------------------
+# User Cache Cleanup
+#-------------------------------------------------------------------------------
+cleanup_user_cache() {
+    print_header "USER CACHE CLEANUP"
+
+    print_section "Cleaning thumbnail cache..."
+    local thumb_dir="$ACTUAL_HOME/.cache/thumbnails"
+    if [[ -d "$thumb_dir" ]]; then
+        local thumb_size
+        thumb_size=$(du -sh "$thumb_dir" 2>/dev/null | cut -f1 || echo "0")
+        print_info "Thumbnail cache size: $thumb_size"
+        if rm -rf "${thumb_dir:?}"/* 2>/dev/null; then
+            print_success "Thumbnail cache cleared"
+        else
+            print_error "Failed to clear thumbnail cache"
+        fi
+    else
+        print_info "No thumbnail cache found"
+    fi
+
+    print_section "Emptying user trash..."
+    local trash_dir="$ACTUAL_HOME/.local/share/Trash"
+    if [[ -d "$trash_dir" ]]; then
+        local trash_size
+        trash_size=$(du -sh "$trash_dir" 2>/dev/null | cut -f1 || echo "0")
+        print_info "Trash size: $trash_size"
+        if rm -rf "${trash_dir:?}"/files/* "${trash_dir:?}"/info/* 2>/dev/null; then
+            print_success "User trash emptied"
+        else
+            print_info "Trash may already be empty or inaccessible"
+        fi
+    else
+        print_info "No trash directory found"
+    fi
+}
+
+#-------------------------------------------------------------------------------
+# Summary Report
+#-------------------------------------------------------------------------------
+print_summary() {
+    print_header "MAINTENANCE SUMMARY"
+
+    echo -e "\n${BOLD}Updates Applied:${RESET}"
+    echo -e "  • DNF packages updated:      ${GREEN}$PACKAGES_UPDATED${RESET}"
+    echo -e "  • Flatpak apps updated:      ${GREEN}$FLATPAKS_UPDATED${RESET}"
+    echo -e "  • Homebrew packages updated: ${GREEN}$BREW_UPDATED${RESET}"
+
+    echo -e "\n${BOLD}Disk Space:${RESET}"
+    echo -e "  • Before: $INITIAL_DISK_USAGE"
+    echo -e "  • After:  $FINAL_DISK_USAGE"
+
+    local space_freed
+    space_freed=$(calculate_space_freed "$INITIAL_DISK_BYTES" "$FINAL_DISK_BYTES")
+    if [[ "$space_freed" != "0" ]]; then
+        echo -e "  • ${GREEN}${BOLD}Space freed: $space_freed${RESET}"
+    fi
+
+    echo ""
+    if [[ $ERRORS_ENCOUNTERED -eq 0 ]]; then
+        echo -e "${GREEN}${BOLD}✓ Maintenance completed successfully!${RESET}"
+    else
+        echo -e "${YELLOW}${BOLD}⚠ Maintenance completed with $ERRORS_ENCOUNTERED error(s)${RESET}"
+    fi
+
+    echo -e "\n${YELLOW}Completed at: $(date)${RESET}"
+    echo ""
+}
+
+#-------------------------------------------------------------------------------
+# Main Execution
+#-------------------------------------------------------------------------------
+main() {
+    check_privileges
+    report_initial_disk
+
+    # Core Updates
+    update_dnf
+    update_flatpak
+    update_homebrew
+    check_firmware
+
+    # Cleanup Operations
+    cleanup_dnf
+    show_kernel_info
+    cleanup_flatpak
+    cleanup_homebrew
+    cleanup_journal
+    cleanup_user_cache
+
+    # Final Report
+    report_final_disk
+    print_summary
+}
+
+# Run main function
+main "$@"

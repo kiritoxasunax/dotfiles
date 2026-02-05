@@ -137,7 +137,7 @@ alias ls="eza --icons"
 alias ll="eza -l --icons --git --group-directories-first"
 alias lt="eza --tree --level=2 --icons"
 # System maintenance
-alias sysup="sudo ~/scripts/system-maintenance"
+alias sysup="sudo ~/dotfiles/bin/system-maintenance"
 source ~/powerlevel10k/powerlevel10k.zsh-theme
 
 # To customize prompt, run `p10k configure` or edit ~/.p10k.zsh.
