@@ -203,7 +203,7 @@ view_changelogs() {
                 print_header "CHANGELOG: $pkg_name"
                 echo ""
 
-                if ! dnf changelog --changelogs "$pkg_name" 2>/dev/null | head -100; then
+                if ! dnf changelog "$pkg_name" 2>/dev/null | head -100; then
                     print_error "Could not retrieve changelog for $pkg_name"
                 fi
 
@@ -244,7 +244,7 @@ prompt_for_changelogs() {
                     print_header "CHANGELOG: $pkg_name"
                     echo ""
 
-                    if ! dnf changelog --changelogs "$pkg_name" 2>/dev/null | head -100; then
+                    if ! dnf changelog "$pkg_name" 2>/dev/null | head -100; then
                         print_error "Could not retrieve changelog for $pkg_name"
                     fi
 
